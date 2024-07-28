@@ -1,0 +1,10 @@
+{
+  "satellite": "ISS (ZARYA)",
+  "start": "2024-07-28T21:44:16-07:00",
+  "end": "2024-07-28T21:46:21-07:00",
+  "trajectory": {
+    "step": 1,
+    "pad": 30,
+    "offset_multiplier": 10
+  }
+}

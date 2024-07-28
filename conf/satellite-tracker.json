@@ -1,0 +1,13 @@
+{
+  "location": {
+    "latitude": 49.2849,
+    "longitude": -122.8678
+  },
+  "datetime": {
+    "timezone": "America/Vancouver"
+  },
+  "telescope": {
+    "comport": "COM3",
+    "max_slew_rate": 18000
+  }
+}

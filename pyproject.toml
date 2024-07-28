@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "iss-tracker"
+version = "0.1.0"
+description = ""
+authors = ["tristeng <tristen.georgiou@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+nexstar-control = "^1.0.0"
+skyfield = "^1.49"
+sympy = "^1.13.1"
+pydantic = "^2.8.2"
+matplotlib = "^3.9.1"
+mpld3 = "^0.5.10"
+
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.5.5"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
