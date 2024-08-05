@@ -68,11 +68,14 @@ class TrackingConfig(BaseModel):
     start: datetime.datetime
     end: datetime.datetime
     trajectory: TrajectoryConfig
+    tracking_period: PositiveFloat
 
     @model_validator(mode="after")
     def check_start_before_end(self) -> Self:
         if self.start >= self.end:
             raise ValueError("start must be before end")
+        if self.tracking_period < 0.1:
+            raise ValueError("tracking_period must be at least 0.1 seconds")
         return self
 
     @property

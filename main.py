@@ -10,7 +10,13 @@ from zoneinfo import ZoneInfo
 from skyfield.api import load, wgs84
 
 from tracker.model import load_config, load_tracking_config
-from tracker.utils import load_stations_data, generate_trajectory
+from tracker.utils import (
+    load_stations_data,
+    generate_trajectory,
+    init_telescope,
+    track_satellite,
+    load_active_data,
+)
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +46,22 @@ if __name__ == "__main__":
         help="The command to execute.",
         choices=["execute", "dryrun", "trajectory"],
     )
+
+    # add optional flag to set the telescope location
+    parser.add_argument(
+        "--set-location",
+        help="Set the telescope location using the configured latitude and longitude.",
+        action="store_true",
+        default=False,
+    )
+
+    # add optional flag to set the telescope time
+    parser.add_argument(
+        "--set-time",
+        help="Set the telescope time using the PC time and the configured timezone.",
+        action="store_true",
+        default=False,
+    )
     args = parser.parse_args()
 
     # load the base configuration
@@ -53,10 +75,16 @@ if __name__ == "__main__":
     tracking_config = load_tracking_config(args.satellite)
 
     stations_data = load_stations_data(ts)
+    active_data = load_active_data(ts)
+
+    # merge the 2 dictionaries
+    stations_data.update(active_data)
     try:
         satellite = stations_data[tracking_config.satellite]
     except KeyError:
-        log.error(f"Could not find tracking information for '{tracking_config.satellite}'.")
+        log.error(
+            f"Could not find tracking information for '{tracking_config.satellite}'."
+        )
         available = "\n".join(stations_data.keys())
         log.error(f"Available satellites: \n{available}")
         exit(1)
@@ -92,6 +120,25 @@ if __name__ == "__main__":
         f"Satellite pass will begin in {hours:.0f} hours, {minutes:.0f} minutes, and {seconds:.0f} seconds."
     )
 
+    # generate and plot the trajectory
+    is_trajectory = args.command == "trajectory"
     traj = generate_trajectory(
-        satellite, obs_location, tracking_config, ts, tz, config.telescope.max_slew_rate
+        satellite,
+        obs_location,
+        tracking_config,
+        ts,
+        tz,
+        config.telescope.max_slew_rate,
+        is_trajectory,  # plot the trajectory if we are in trajectory mode
     )
+
+    if is_trajectory:
+        log.info("Trajectory generated. Exiting.")
+        exit(0)
+
+    # initialize the telescope, setting the location and time if the flags are not set
+    hc = init_telescope(config, set_location=args.set_location, set_time=args.set_time)
+
+    # track the satellite - in dryryn mode it will sweep across the trajectory immediately
+    is_dryrun = args.command == "dryrun"
+    track_satellite(hc, traj, tracking_config, is_dryrun)

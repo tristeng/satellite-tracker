@@ -2,12 +2,19 @@
 # Copyright Tristen Georgiou 2024
 #
 import datetime
+import enum
 import logging
 import pathlib
+import time
 from zoneinfo import ZoneInfo
 
 import numpy as np
-from nexstar_control.device import NexStarHandControl, LatitudeDMS, LongitudeDMS
+from nexstar_control.device import (
+    NexStarHandControl,
+    LatitudeDMS,
+    LongitudeDMS,
+    TrackingMode,
+)
 from skyfield.api import load
 from skyfield.iokit import parse_tle_file
 from skyfield.sgp4lib import EarthSatellite
@@ -23,10 +30,46 @@ log = logging.getLogger(__name__)
 
 DATA_DIR = pathlib.Path("data")
 STATIONS_FILE = DATA_DIR / "stations.tle"
-CELESTRAK_STATIONS_URL = (
-    "https://celestrak.com/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle"
-)
+ACTIVE_FILE = DATA_DIR / "active.tle"
+CELESTRAK_URL = "https://celestrak.com/NORAD/elements/gp.php?FORMAT=tle&GROUP="
 MAX_DATA_AGE = 7.0  # days
+
+
+class CelestrakGroup(str, enum.Enum):
+    STATIONS = "stations"
+    ACTIVE = "active"
+
+
+def load_celestrak_data(
+    timescale: Timescale, cache_path: pathlib.Path, group: CelestrakGroup
+) -> dict[str, EarthSatellite]:
+    """
+    Load data from Celestrak.
+
+    :param timescale: A Timescale object.
+    :param cache_path: The path to the local cache file.
+    :param group: The Celestrak group to load.
+    :return: A dictionary of EarthSatellite objects keyed by their name.
+    """
+
+    log.info(f"Loading satellite data for group {group.name}...")
+
+    cache_path = str(cache_path)
+    url = CELESTRAK_URL + group.value
+    if not load.exists(cache_path) or load.days_old(cache_path) >= MAX_DATA_AGE:
+        log.info("Downloading satellite data...")
+        load.download(url, filename=cache_path)
+        log.info("satellite data downloaded successfully.")
+    else:
+        log.info("Data cache is up to date - no downloads required.")
+
+    with load.open(cache_path) as f:
+        stations = list(parse_tle_file(f, timescale))
+
+    log.info(
+        f"Satellite data group {group.name} loaded successfully. Found {len(stations)} satellite(s)."
+    )
+    return {sat.name: sat for sat in stations}
 
 
 def load_stations_data(timescale: Timescale) -> dict[str, EarthSatellite]:
@@ -36,27 +79,21 @@ def load_stations_data(timescale: Timescale) -> dict[str, EarthSatellite]:
     :param timescale: A Timescale object.
     :return: A dictionary of EarthSatellite objects keyed by their name.
     """
+    return load_celestrak_data(timescale, STATIONS_FILE, CelestrakGroup.STATIONS)
 
-    log.info("Loading stations data...")
 
-    name = str(STATIONS_FILE)
-    url = CELESTRAK_STATIONS_URL
-    if not load.exists(name) or load.days_old(name) >= MAX_DATA_AGE:
-        log.info("Downloading stations data...")
-        load.download(url, filename=name)
-        log.info("Stations data downloaded successfully.")
-    else:
-        log.info("Data cache is up to date - no downloads required.")
+def load_active_data(timescale: Timescale) -> dict[str, EarthSatellite]:
+    """
+    Load active data from Celestrak.
 
-    with load.open(name) as f:
-        stations = list(parse_tle_file(f, timescale))
-
-    log.info(f"Stations data loaded successfully. Found {len(stations)} station(s).")
-    return {sat.name: sat for sat in stations}
+    :param timescale: A Timescale object.
+    :return: A dictionary of EarthSatellite objects keyed by their name.
+    """
+    return load_celestrak_data(timescale, ACTIVE_FILE, CelestrakGroup.ACTIVE)
 
 
 def init_telescope(
-    conf: Config, set_location=True, set_time=True
+    conf: Config, set_location=False, set_time=False
 ) -> NexStarHandControl:
     """
     Initialize the telescope and optionally set the location and time.
@@ -100,6 +137,7 @@ def generate_trajectory(
     ts: Timescale,
     tz: ZoneInfo,
     max_slew_rate: float,
+    plot_trajectory: bool,
 ) -> MininumTrajectory:
     """
     Generate a minimum trajectory for the satellite.
@@ -110,6 +148,7 @@ def generate_trajectory(
     :param ts: the timescale object
     :param tz: the timezone object of the observer
     :param max_slew_rate: the maximum slew rate of the telescope
+    :param plot_trajectory: whether to plot the trajectory
     :return: the minimum trajectory object
     """
     # convert to utc and create a range of times
@@ -149,10 +188,10 @@ def generate_trajectory(
             if abs(laz - z) > 180:
                 if laz > z:
                     zfp = z - laz + 360
-                    z += 360  # trajectory generation requires absolute changes
+                    z += 360  # trajectory generation requires a continuous trajectory
                 else:
                     zfp = z - laz - 360
-                    z -= 360  # trajectory generation requires absolute changes
+                    z -= 360  # trajectory generation requires a continuous trajectory
             daz = z - laz
             dt = (event_time - lti).seconds
             alt_slew_rate = dalt / dt * 3600
@@ -215,48 +254,189 @@ def generate_trajectory(
     traj.generate(points, times)
     log.info("Minimum trajectory generated successfully.")
 
-    # use matplotlib to plot the input points and the generated trajectory
-    plottimes = np.linspace(times[0], times[-1], len(times) * 10)
+    if plot_trajectory:
+        # use matplotlib to plot the input points and the generated trajectory
+        plottimes = np.linspace(times[0], times[-1], len(times) * 10)
 
-    fig, ax = plt.subplots()
-    ax.plot([p[1] for p in points], [p[0] for p in points], "rx", label="input points")
-    ax.plot(
-        [traj.getvalues(t)[1][0] for t in plottimes],
-        [traj.getvalues(t)[0][0] for t in plottimes],
-        "b-",
-        label="trajectory",
-    )
-    ax.set_xlabel("azimuth (°)")
-    ax.set_ylabel("altitude (°)")
-    ax.legend()
-    plt.show()
+        fig, ax = plt.subplots()
+        ax.plot(
+            [p[1] for p in points], [p[0] for p in points], "rx", label="input points"
+        )
+        ax.plot(
+            [traj.getvalues(t)[1][0] for t in plottimes],
+            [traj.getvalues(t)[0][0] for t in plottimes],
+            "b-",
+            label="trajectory",
+        )
+        ax.set_xlabel("azimuth (°)")
+        ax.set_ylabel("altitude (°)")
+        ax.legend()
+        plt.show()
 
-    # plot the az/alt rates of change as well for the input points
-    fig, ax = plt.subplots()
-    ax.plot([p[1] for p in rates], [p[0] for p in rates], "rx", label="input rates")
-    ax.plot(
-        [traj.getvalues(t)[1][1] * 3600 for t in plottimes],
-        [traj.getvalues(t)[0][1] * 3600 for t in plottimes],
-        "b-",
-        label="trajectory",
-    )
-    ax.set_xlabel("azimuth rate (\"/s)")
-    ax.set_ylabel("altitude rate (\"/s)")
-    ax.legend()
-    plt.show()
+        # plot the az/alt rates of change as well for the input points
+        fig, ax = plt.subplots()
+        ax.plot([p[1] for p in rates], [p[0] for p in rates], "rx", label="input rates")
+        ax.plot(
+            [traj.getvalues(t)[1][1] * 3600 for t in plottimes],
+            [traj.getvalues(t)[0][1] * 3600 for t in plottimes],
+            "b-",
+            label="trajectory",
+        )
+        ax.set_xlabel('azimuth rate ("/s)')
+        ax.set_ylabel('altitude rate ("/s)')
+        ax.legend()
+        plt.show()
 
-    # double check our work if in debug mode
-    if log.isEnabledFor(logging.DEBUG):
-        for t in plottimes:
-            vals = traj.getvalues(t)
-            x = vals[0][0]
-            y = vals[1][0]
+        # double check our work if in debug mode
+        if log.isEnabledFor(logging.DEBUG):
+            for t in plottimes:
+                vals = traj.getvalues(t)
+                x = vals[0][0]
+                y = vals[1][0]
 
-            dx = vals[0][1] * 3600  # convert to arcseconds per second
-            dy = vals[1][1] * 3600
+                dx = vals[0][1] * 3600  # convert to arcseconds per second
+                dy = vals[1][1] * 3600
 
-            log.info(
-                f"time: {t:.1f}, alt: {x:.5f}°, az: {y:.5f}°, alt rate: {dx:.5f}″/s, az rate: {dy:.5f}″/s"
-            )
+                log.info(
+                    f"time: {t:.1f}, alt: {x:.5f}°, az: {y:.5f}°, alt rate: {dx:.5f}″/s, az rate: {dy:.5f}″/s"
+                )
 
     return traj
+
+
+def track_satellite(
+    hc: NexStarHandControl,
+    traj: MininumTrajectory,
+    tracking_config: TrackingConfig,
+    is_dryrun: bool,
+) -> None:
+    """
+    Track the satellite along the trajectory.
+
+    :param hc: an initialized NexStarHandControl object
+    :param traj: the minimum trajectory object
+    :param tracking_config: the tracking configuration object
+    :param is_dryrun: a dry run will move the telescope but won't wait for the start time - useful for debugging
+    """
+
+    # move to the start location
+    vals = traj.getvalues(traj.times[0])
+    az, alt = vals[1][0], vals[0][0]
+
+    log.info(f"Moving to the start location azimuth, altitude {az}, {alt}...")
+    hc.goto_azm_alt_precise(az, alt)
+    while hc.is_goto_in_progress():
+        time.sleep(0.5)
+
+    log.info("Arrived at satellite trajectory start location.")
+
+    # if this isn't a dryrun, we need to wait until the start time
+    if not is_dryrun:
+        start = tracking_config.start.astimezone(ZoneInfo("UTC"))
+        now = datetime.datetime.now(tz=ZoneInfo("UTC"))
+
+        # include the pad time in our wait - we start moving the telescope early so it can get up to speed
+        delta = start - now - tracking_config.trajectory.pad
+        log.info(
+            f"Waiting {delta.total_seconds()} seconds before beginning satellite tracking"
+        )
+        time.sleep(delta.total_seconds())
+    else:
+        log.info("This is a dryrun - telescope will move along trajectory immediately")
+
+    # stamp our start time
+    start_time = time.time()
+
+    # start tracking
+    log.info("Starting satellite tracking...")
+
+    # set the tracking mode to off but keep the current mode so we can restore it later
+    current_tracking_mode = hc.get_tracking_mode()
+    hc.set_tracking_mode(TrackingMode.OFF)
+
+    # we'll track the positional error so we can plot it afterwords
+    pos_error: list[tuple[float, tuple[float, float]]] = []
+    period = tracking_config.tracking_period
+    try:
+        # main loop - we exit once the duration is reached - duration is the original trajectory
+        # duration and 2x the configurable pad time
+        duration = (
+            tracking_config.get_duration_seconds + 2 * tracking_config.trajectory.pad
+        )
+
+        # we pad the start time so the telescope can get up to speed
+        padded_start_time = start_time + tracking_config.trajectory.pad
+        loop_counter = 0
+        lazm, _ = hc.get_position_azm_alt()
+
+        # we'll log a percent complete message every 5 seconds
+        num_loops_for_log = round(5 / period)
+
+        while time.time() - start_time < duration:
+            op_start = time.time()
+
+            # get the current relative time - this will be negative at first to account for padding
+            rt = op_start - padded_start_time
+
+            # get the azimuth and altitude velocities from the trajectory for the current time
+            # and convert to arcseconds per second
+            vals = traj.getvalues(rt)
+            azm_rate = round(vals[1][1] * 3600)
+            alt_rate = round(vals[0][1] * 3600)
+
+            # update the slew rates
+            hc.slew_variable(azm_rate, alt_rate)
+
+            # determine the error between the expected and actual positions
+            azm, alt = hc.get_position_azm_alt()
+
+            # handle case when azimuth crosses 0/360° boundary
+            if abs(lazm - azm) > 180:
+                if lazm > azm:
+                    azm += 360
+                else:
+                    azm -= 360
+            pos_error.append((rt, (vals[1][0] - azm, vals[0][0] - alt)))
+            lazm = azm
+
+            if loop_counter % num_loops_for_log == 0:
+                log.info(
+                    f"Progress: {((rt + tracking_config.trajectory.pad) / duration) * 100:.1f}%"
+                )
+
+            # detect if the operations took longer than the period
+            op_end = time.time()
+            op_duration = op_end - op_start
+            if op_duration > period:
+                log.warning(
+                    "Operation took longer than the period - consider increasing the period"
+                )
+
+            # sleep until next loop
+            if op_duration < period:
+                time.sleep(period - op_duration)
+            loop_counter += 1
+    finally:
+        # stop slewing and restore the tracking mode no matter what
+        log.info("Completed satellite tracking")
+        hc.slew_stop()
+        hc.set_tracking_mode(current_tracking_mode)
+
+    # plot the positional errors over time
+    fig, ax = plt.subplots()
+    ax.plot(
+        [p[0] for p in pos_error],
+        [p[1][0] for p in pos_error],
+        "r-",
+        label="azimuth error",
+    )
+    ax.plot(
+        [p[0] for p in pos_error],
+        [p[1][1] for p in pos_error],
+        "b-",
+        label="altitude error",
+    )
+    ax.set_xlabel("time (s)")
+    ax.set_ylabel("error (°)")
+    ax.legend()
+    plt.show()
