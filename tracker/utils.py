@@ -6,7 +6,7 @@ import enum
 import logging
 import pathlib
 import time
-from zoneinfo import ZoneInfo
+import zoneinfo
 
 import numpy as np
 from nexstar_control.device import (
@@ -123,7 +123,7 @@ def init_telescope(
 
     # set the time
     if set_time:
-        dt = datetime.datetime.now(tz=ZoneInfo(conf.datetime.timezone))
+        dt = datetime.datetime.now(tz=zoneinfo.ZoneInfo(conf.datetime.timezone))
         log.info(f"Setting time to {dt}")
         hc.set_time(dt)
 
@@ -135,7 +135,7 @@ def generate_trajectory(
     obs_location: GeographicPosition,
     tracking_config: TrackingConfig,
     ts: Timescale,
-    tz: ZoneInfo,
+    tz: zoneinfo.ZoneInfo,
     max_slew_rate: float,
     plot_trajectory: bool,
 ) -> MininumTrajectory:
@@ -152,7 +152,7 @@ def generate_trajectory(
     :return: the minimum trajectory object
     """
     # convert to utc and create a range of times
-    start = tracking_config.start.astimezone(ZoneInfo("UTC"))
+    start = tracking_config.start.astimezone(zoneinfo.ZoneInfo("UTC"))
     step = tracking_config.trajectory.step
     tr = ts.utc(
         start.year,
@@ -330,15 +330,21 @@ def track_satellite(
 
     log.info("Arrived at satellite trajectory start location.")
 
+    pad = tracking_config.trajectory.pad
+
     # if this isn't a dryrun, we need to wait until the start time
     if not is_dryrun:
-        start = tracking_config.start.astimezone(ZoneInfo("UTC"))
-        now = datetime.datetime.now(tz=ZoneInfo("UTC"))
+        start = tracking_config.start.astimezone(zoneinfo.ZoneInfo("UTC"))
+        now = datetime.datetime.now(tz=zoneinfo.ZoneInfo("UTC"))
+
+        delta = start - now
+        log.info(f"Satellite tracking starts in {delta.total_seconds()} seconds...")
 
         # include the pad time in our wait - we start moving the telescope early so it can get up to speed
-        delta = start - now - tracking_config.trajectory.pad
+        delta -= datetime.timedelta(seconds=pad)
         log.info(
-            f"Waiting {delta.total_seconds()} seconds before beginning satellite tracking"
+            f"Waiting {delta.total_seconds()} seconds before beginning satellite tracking "
+            f"(includes pad time of {pad} seconds)"
         )
         time.sleep(delta.total_seconds())
     else:
@@ -354,23 +360,25 @@ def track_satellite(
     current_tracking_mode = hc.get_tracking_mode()
     hc.set_tracking_mode(TrackingMode.OFF)
 
-    # we'll track the positional error so we can plot it afterwords
+    # we'll track the positional error occasionally so we can plot it afterwords
     pos_error: list[tuple[float, tuple[float, float]]] = []
     period = tracking_config.tracking_period
     try:
         # main loop - we exit once the duration is reached - duration is the original trajectory
         # duration and 2x the configurable pad time
-        duration = (
-            tracking_config.get_duration_seconds + 2 * tracking_config.trajectory.pad
-        )
+        duration = tracking_config.get_duration_seconds + 2 * pad
 
         # we pad the start time so the telescope can get up to speed
-        padded_start_time = start_time + tracking_config.trajectory.pad
+        padded_start_time = start_time + pad
         loop_counter = 0
         lazm, _ = hc.get_position_azm_alt()
 
         # we'll log a percent complete message every 5 seconds
-        num_loops_for_log = round(5 / period)
+        num_loops_for_progress = round(5 / period)
+
+        # for error logging - let's limit that to every second since commanding rates
+        # is more important and fetching current position adds a round trip to the telescope
+        num_loops_for_log = round(1 / period)
 
         while time.time() - start_time < duration:
             op_start = time.time()
@@ -387,22 +395,24 @@ def track_satellite(
             # update the slew rates
             hc.slew_variable(azm_rate, alt_rate)
 
-            # determine the error between the expected and actual positions
-            azm, alt = hc.get_position_azm_alt()
-
-            # handle case when azimuth crosses 0/360° boundary
-            if abs(lazm - azm) > 180:
-                if lazm > azm:
-                    azm += 360
-                else:
-                    azm -= 360
-            pos_error.append((rt, (vals[1][0] - azm, vals[0][0] - alt)))
-            lazm = azm
-
+            # we throttle the error logging because we will get more accuracy with more frequent
+            # rate updates
             if loop_counter % num_loops_for_log == 0:
-                log.info(
-                    f"Progress: {((rt + tracking_config.trajectory.pad) / duration) * 100:.1f}%"
-                )
+                # determine the error between the expected and actual positions
+                azm, alt = hc.get_position_azm_alt()
+
+                # handle case when azimuth crosses 0/360° boundary
+                if abs(lazm - azm) > 180:
+                    if lazm > azm:
+                        azm += 360
+                    else:
+                        azm -= 360
+                pos_error.append((rt, (vals[1][0] - azm, vals[0][0] - alt)))
+                lazm = azm
+
+            # log a progress message occasionally
+            if loop_counter % num_loops_for_progress == 0:
+                log.info(f"Progress: {((rt + pad) / duration) * 100:.1f}%")
 
             # detect if the operations took longer than the period
             op_end = time.time()
