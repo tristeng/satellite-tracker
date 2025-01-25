@@ -346,7 +346,7 @@ def track_satellite(
             f"Waiting {delta.total_seconds()} seconds before beginning satellite tracking "
             f"(includes pad time of {pad} seconds)"
         )
-        time.sleep(delta.total_seconds())
+        sleep_with_messages(delta.total_seconds())
     else:
         log.info("This is a dryrun - telescope will move along trajectory immediately")
 
@@ -450,3 +450,29 @@ def track_satellite(
     ax.set_ylabel("error (°)")
     ax.legend()
     plt.show()
+
+
+def sleep_with_messages(seconds: float) -> None:
+    """
+    Sleeps for the given time and logs a message at a frequency dependent on how much time is remaining - more frequent
+    as the time remaining approaches zero to a maximum of every 1 second.
+
+    :param seconds: The total number of seconds to sleep.
+    """
+    remaining = seconds
+    while remaining > 0:
+        if remaining > 60:
+            interval = 20
+        elif remaining > 30:
+            interval = 10
+        elif remaining > 10:
+            interval = 5
+        elif remaining > 5:
+            interval = 2
+        else:
+            # handle fractional seconds that could be left
+            interval = 1 if remaining >= 1 else remaining
+
+        log.info(f"{remaining:.2f} seconds remaining...")
+        time.sleep(interval)
+        remaining -= interval
